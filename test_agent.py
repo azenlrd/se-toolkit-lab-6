@@ -48,10 +48,44 @@ def test_framework_question_uses_read_file() -> None:
     assert "read_file" in tool_names
 
 
+def test_docker_cleanup_wiki_question_reads_docker_pages() -> None:
+    data = run_agent(
+        "What does the project wiki say about cleaning up Docker? List the commands."
+    )
+    tool_names = [call["tool"] for call in data.get("tool_calls", [])]
+    read_paths = [call.get("args", {}).get("path", "") for call in data.get("tool_calls", [])]
+    assert "read_file" in tool_names
+    assert "wiki/docker.md" in read_paths
+    assert "docker" in data.get("answer", "").lower()
+
+
+def test_dockerfile_question_reads_backend_dockerfile() -> None:
+    data = run_agent("Read the Dockerfile and explain how the backend container starts.")
+    tool_names = [call["tool"] for call in data.get("tool_calls", [])]
+    read_paths = [call.get("args", {}).get("path", "") for call in data.get("tool_calls", [])]
+    answer_lower = data.get("answer", "").lower()
+    assert "read_file" in tool_names
+    assert "Dockerfile" in read_paths
+    assert "cmd" in answer_lower or "run.py" in answer_lower or "multi-stage" in answer_lower
+
+
 def test_item_count_question_uses_query_api() -> None:
     data = run_agent("How many items are in the database?")
     tool_names = [call["tool"] for call in data.get("tool_calls", [])]
     assert "query_api" in tool_names
+
+
+def test_distinct_groups_question_uses_query_api() -> None:
+    data = run_agent("How many distinct groups are there among learners?")
+    tool_names = [call["tool"] for call in data.get("tool_calls", [])]
+    assert "query_api" in tool_names
+
+
+def test_distinct_endpoint_question_queries_that_endpoint() -> None:
+    data = run_agent("How many distinct learner_id values are in /interactions/?")
+    query_calls = [call for call in data.get("tool_calls", []) if call.get("tool") == "query_api"]
+    assert query_calls
+    assert "/interactions" in query_calls[0].get("args", {}).get("path", "")
 
 
 def test_unauthenticated_items_status_uses_query_api() -> None:
