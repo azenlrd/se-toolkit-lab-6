@@ -1134,7 +1134,7 @@ def run_agent(query: str) -> None:
     if source:
         final_output["source"] = source
 
-    print(json.dumps(final_output, indent=2))
+    print(json.dumps(final_output))
 
 
 if __name__ == "__main__":
