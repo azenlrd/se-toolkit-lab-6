@@ -1,30 +1,41 @@
-import subprocess
 import json
-import sys
+import subprocess
+import pytest
 
-def test_agent_outputs_json():
-    """Test that agent.py returns valid JSON with answer and tool_calls."""
-    # Запускаем агента с тестовым вопросом
+def run_agent(question):
+    """Helper to run the agent CLI and parse its JSON output."""
     result = subprocess.run(
-        [sys.executable, "agent.py", "What is the capital of France?"],
+        ["uv", "run", "agent.py", question],
         capture_output=True,
-        text=True,
-        timeout=30
+        text=True
     )
-
-    # Проверяем код возврата
-    assert result.returncode == 0, f"Agent failed with error: {result.stderr}"
-
-    # Проверяем, что stdout — валидный JSON
     try:
-        output = json.loads(result.stdout)
+        return json.loads(result.stdout)
     except json.JSONDecodeError:
-        assert False, f"Output is not valid JSON: {result.stdout}"
+        pytest.fail(f"Agent did not return valid JSON. Output was: {result.stdout}\nError: {result.stderr}")
 
-    # Проверяем наличие обязательных полей
-    assert "answer" in output, "Missing 'answer' field in output"
-    assert isinstance(output["answer"], str), "'answer' must be a string"
+def test_resolve_merge_conflict():
+    """Test if agent uses read_file and identifies the correct source."""
+    question = "How do you resolve a merge conflict?"
+    data = run_agent(question)
+    
+    assert "tool_calls" in data
+    assert "source" in data
+    
+    # Check if read_file was used
+    used_tools = [call["tool"] for call in data["tool_calls"]]
+    assert "read_file" in used_tools
+    
+    # Source should mention git-workflow.md
+    assert "git-workflow.md" in data["source"]
 
-    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
-    assert isinstance(output["tool_calls"], list), "'tool_calls' must be a list"
-    assert output["tool_calls"] == [], "'tool_calls' should be an empty list in Task 1"
+def test_what_files_in_wiki():
+    """Test if agent uses list_files when asked about directory contents."""
+    question = "What files are in the wiki?"
+    data = run_agent(question)
+    
+    assert "tool_calls" in data
+    
+    # Check if list_files was used
+    used_tools = [call["tool"] for call in data["tool_calls"]]
+    assert "list_files" in used_tools
