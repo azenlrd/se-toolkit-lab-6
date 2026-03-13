@@ -24,9 +24,21 @@ def load_local_env_files() -> None:
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+                if "=" not in line:
+                    continue
             key, _, value = line.partition("=")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = value.strip()
+            if value and value[0] not in {"'", '"'}:
+                value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
             if key and key not in os.environ:
                 os.environ[key] = value
 
@@ -64,6 +76,7 @@ def list_files(path: str = ".") -> str:
 
 def query_api(method: str, path: str, body: Optional[str] = None) -> str:
     """Call the backend API, with an opt-out prefix for unauthenticated checks."""
+    load_local_env_files()
     method = (method or "GET").upper()
     raw_path = (path or "/").strip()
     use_auth = True
@@ -73,12 +86,24 @@ def query_api(method: str, path: str, body: Optional[str] = None) -> str:
     if not raw_path.startswith("/"):
         raw_path = "/" + raw_path
 
-    url = f"{AGENT_API_BASE_URL.rstrip('/')}{raw_path}"
+    api_base_url = os.getenv("AGENT_API_BASE_URL", AGENT_API_BASE_URL)
+    lms_api_key = os.getenv("LMS_API_KEY", LMS_API_KEY)
+
+    if use_auth and not lms_api_key:
+        return json.dumps(
+            {
+                "status_code": None,
+                "body": None,
+                "error": "LMS_API_KEY is not set",
+            }
+        )
+
+    url = f"{api_base_url.rstrip('/')}{raw_path}"
     headers = {"Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
-    if use_auth and LMS_API_KEY:
-        headers["Authorization"] = f"Bearer {LMS_API_KEY}"
+    if use_auth and lms_api_key:
+        headers["Authorization"] = f"Bearer {lms_api_key}"
 
     data = body.encode("utf-8") if body is not None else None
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -571,6 +596,7 @@ def answer_from_observations(query: str, observations: list[dict], fallback: str
 
     if flags["item_count"]:
         attempted_item_query = False
+        auth_failure_status = None
         for obs in reversed(observations):
             if obs.get("tool") != "query_api":
                 continue
@@ -578,13 +604,22 @@ def answer_from_observations(query: str, observations: list[dict], fallback: str
             if "/items/" in obs_path:
                 attempted_item_query = True
             payload = parse_query_api_result(obs.get("content", ""))
+            status_code = payload.get("status_code")
+            if status_code in (401, 403):
+                auth_failure_status = status_code
+                continue
             count = count_items_from_payload(payload)
             if count is not None:
                 return f"There are {count} items in the database"
             if payload.get("error"):
                 return f"I could not reach the backend to count items: {payload['error']}"
+        if auth_failure_status is not None:
+            return (
+                "I could not count items because authentication failed "
+                f"(status code {auth_failure_status})."
+            )
         if attempted_item_query:
-            return "There are 0 items in the database"
+            return "I could not determine the item count from the API response."
 
     if flags["unauth_status"]:
         attempted_unauth_query = False
