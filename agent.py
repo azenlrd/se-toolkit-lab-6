@@ -576,7 +576,7 @@ def answer_from_observations(query: str, observations: list[dict], fallback: str
             payload = parse_query_api_result(obs.get("content", ""))
             count = count_items_from_payload(payload)
             if count is not None:
-                return f"There are {count} items in the database."
+                return f"There are {count} items in the database"
             if payload.get("error"):
                 return f"I could not reach the backend to count items: {payload['error']}"
 
@@ -1112,6 +1112,43 @@ def run_agent(query: str) -> None:
                     "args": {"path": "backend/app/etl.py"},
                     "result": manual_source_result[:5000]
                     + ("\n...[truncated]" if len(manual_source_result) > 5000 else ""),
+                }
+            )
+
+    # Stabilize count questions: if the DB appears empty, try a sync once and re-count.
+    if flags.get("item_count"):
+        item_query_calls = [
+            call
+            for call in executed_tool_calls
+            if call.get("tool") == "query_api"
+            and ((call.get("args") or {}).get("path", "").startswith("/items/"))
+        ]
+        latest_count = None
+        if item_query_calls:
+            latest_payload = safe_json_loads(item_query_calls[-1].get("result", ""), {})
+            if isinstance(latest_payload, dict):
+                latest_count = count_items_from_payload(latest_payload)
+
+        if latest_count == 0:
+            sync_result = query_api("POST", "/pipeline/sync")
+            executed_tool_calls.append(
+                {
+                    "id": "manual-item-sync",
+                    "tool": "query_api",
+                    "args": {"method": "POST", "path": "/pipeline/sync"},
+                    "result": sync_result[:5000]
+                    + ("\n...[truncated]" if len(sync_result) > 5000 else ""),
+                }
+            )
+
+            recount_result = query_api("GET", "/items/")
+            executed_tool_calls.append(
+                {
+                    "id": "manual-item-recount",
+                    "tool": "query_api",
+                    "args": {"method": "GET", "path": "/items/"},
+                    "result": recount_result[:5000]
+                    + ("\n...[truncated]" if len(recount_result) > 5000 else ""),
                 }
             )
 
