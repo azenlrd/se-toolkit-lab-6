@@ -238,8 +238,18 @@ def question_flags(query: str) -> dict[str, bool]:
         "dockerfile_details": "dockerfile" in q,
         "branch_protect": "protect" in q and "branch" in q,
         "ssh": "ssh" in q or "connect to the vm" in q or "connect to your vm" in q,
+        "distinct_count": (
+            "distinct" in q
+            or "unique" in q
+            or "different " in q
+            or "number of unique" in q
+            or "number of distinct" in q
+        )
+        and "how many" in q,
         "item_count": ("how many items" in q or "item count" in q)
-        and ("database" in q or "items" in q),
+        and ("database" in q or "items" in q)
+        and "distinct" not in q
+        and "unique" not in q,
         "unauth_status": "/items/" in q
         and (
             "without authentication" in q
@@ -510,6 +520,131 @@ def parse_query_api_result(content: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def extract_endpoint_from_query(query: str) -> str:
+    candidates = re.findall(
+        r"(/[a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)*(?:\?[a-zA-Z0-9._~!$&'()*+,;=:@%/-]+)?)",
+        query,
+    )
+    for candidate in candidates:
+        cleaned = candidate.rstrip(").,;:!?\"'")
+        if cleaned.startswith(
+            ("/items", "/learners", "/interactions", "/analytics", "/pipeline")
+        ):
+            return cleaned
+    return ""
+
+
+def extract_lab_from_query(query: str) -> str:
+    match = re.search(r"\blab-(\d{1,2})\b", query.lower())
+    if not match:
+        return ""
+    number = int(match.group(1))
+    return f"lab-{number:02d}"
+
+
+def infer_distinct_query_path(query: str) -> str:
+    q = query.lower()
+    endpoint = extract_endpoint_from_query(query)
+    lab = extract_lab_from_query(query)
+
+    if endpoint:
+        if endpoint.startswith("/analytics/") and "lab=" not in endpoint and lab:
+            separator = "&" if "?" in endpoint else "?"
+            return f"{endpoint}{separator}lab={lab}"
+        return endpoint
+
+    if "group" in q:
+        if lab:
+            return f"/analytics/groups?lab={lab}"
+        return "/learners/"
+
+    if "learner" in q or "student" in q:
+        if "interaction" in q or "submission" in q or "attempt" in q:
+            return "/interactions/"
+        if lab:
+            return f"/analytics/completion-rate?lab={lab}"
+        return "/learners/"
+
+    if "interaction" in q or "submission" in q or "attempt" in q:
+        return "/interactions/"
+
+    return "/items/"
+
+
+def extract_records_from_api_body(body):
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        if isinstance(body.get("items"), list):
+            return body["items"]
+        for value in body.values():
+            if isinstance(value, list):
+                return value
+    return None
+
+
+def _distinct_count(values: list) -> int:
+    normalized = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            normalized.add(json.dumps(value, sort_keys=True))
+        else:
+            normalized.add(str(value))
+    return len(normalized)
+
+
+def distinct_count_from_records(query: str, records: list) -> tuple[Optional[int], str]:
+    q = query.lower()
+    entity = "values"
+    candidates: list[str] = []
+
+    if "group" in q:
+        entity = "groups"
+        candidates = ["student_group", "group"]
+    elif "item type" in q or ("item" in q and "type" in q):
+        entity = "item types"
+        candidates = ["type"]
+    elif "kind" in q:
+        entity = "interaction kinds"
+        candidates = ["kind"]
+    elif "learner" in q or "student" in q:
+        entity = "learners"
+        candidates = ["learner_id", "external_id", "id"]
+    elif "lab" in q:
+        entity = "labs"
+        lab_rows = [
+            row
+            for row in records
+            if isinstance(row, dict)
+            and str(row.get("type", "")).lower() == "lab"
+        ]
+        if lab_rows:
+            ids = [row.get("id") for row in lab_rows]
+            return _distinct_count(ids), entity
+        candidates = ["lab", "lab_id", "title"]
+    elif "item" in q:
+        entity = "items"
+        candidates = ["item_id", "id"]
+
+    if not records:
+        return 0, entity
+
+    if records and not isinstance(records[0], dict):
+        return _distinct_count(records), entity
+
+    for field in candidates:
+        values = [row.get(field) for row in records if isinstance(row, dict) and field in row]
+        if values:
+            return _distinct_count(values), entity
+
+    if all(isinstance(row, dict) and "id" in row for row in records):
+        return _distinct_count([row.get("id") for row in records]), entity
+
+    return None, entity
+
+
 def count_items_from_payload(payload: dict) -> Optional[int]:
     body = payload.get("body")
     if isinstance(body, list):
@@ -668,6 +803,53 @@ def answer_from_observations(query: str, observations: list[dict], fallback: str
             evidence = extract_import_evidence(obs.get("content", ""), "fastapi")
             if evidence:
                 return f"The backend uses FastAPI. Evidence: {evidence}"
+
+    if flags["distinct_count"]:
+        endpoint = infer_distinct_query_path(query)
+        endpoint_root = endpoint.split("?", maxsplit=1)[0] if endpoint else ""
+        attempted = False
+        auth_failure_status = None
+        for obs in reversed(observations):
+            if obs.get("tool") != "query_api":
+                continue
+            obs_path = ((obs.get("args") or {}).get("path") or "").strip()
+            obs_path_clean = obs_path
+            if obs_path_clean.lower().startswith("[noauth]"):
+                continue
+            if endpoint_root and endpoint_root not in obs_path_clean:
+                continue
+
+            attempted = True
+            payload = parse_query_api_result(obs.get("content", ""))
+            status_code = payload.get("status_code")
+            if status_code in (401, 403):
+                auth_failure_status = status_code
+                continue
+            if payload.get("error"):
+                return f"I could not reach the backend to compute the distinct count: {payload['error']}"
+
+            body = payload.get("body")
+            if isinstance(body, dict):
+                if ("learner" in query.lower() or "student" in query.lower()) and isinstance(
+                    body.get("total"), int
+                ):
+                    return f"There are {body['total']} distinct learners"
+                if isinstance(body.get("count"), int):
+                    return f"There are {body['count']} distinct values"
+
+            records = extract_records_from_api_body(body)
+            if isinstance(records, list):
+                count, entity = distinct_count_from_records(query, records)
+                if count is not None:
+                    return f"There are {count} distinct {entity}"
+
+        if auth_failure_status is not None:
+            return (
+                "I could not compute the distinct count because authentication failed "
+                f"(status code {auth_failure_status})."
+            )
+        if attempted:
+            return "I could not determine the distinct count from the API response."
 
     if flags["item_count"]:
         attempted_item_query = False
@@ -1013,6 +1195,13 @@ def emulate_llm(messages: list[dict]) -> dict:
             [tool_call("1", "read_file", {"path": "backend/app/main.py"})],
         )
 
+    if flags["distinct_count"]:
+        endpoint = infer_distinct_query_path(user_query)
+        return assistant_response(
+            "I'll query the backend and compute the distinct count.",
+            [tool_call("1", "query_api", {"method": "GET", "path": endpoint})],
+        )
+
     if flags["dockerfile_details"] and not flags["request_journey"]:
         query_lower = user_query.lower()
         paths = ["Dockerfile"]
@@ -1350,6 +1539,23 @@ def run_agent(query: str) -> None:
                     "args": {"path": path},
                     "result": manual_source_result[:5000]
                     + ("\n...[truncated]" if len(manual_source_result) > 5000 else ""),
+                }
+            )
+
+    if flags.get("distinct_count"):
+        has_distinct_query = any(
+            call.get("tool") == "query_api" for call in executed_tool_calls
+        )
+        if not has_distinct_query:
+            distinct_path = infer_distinct_query_path(query)
+            distinct_result = query_api("GET", distinct_path)
+            executed_tool_calls.append(
+                {
+                    "id": "manual-distinct-query",
+                    "tool": "query_api",
+                    "args": {"method": "GET", "path": distinct_path},
+                    "result": distinct_result[:5000]
+                    + ("\n...[truncated]" if len(distinct_result) > 5000 else ""),
                 }
             )
 

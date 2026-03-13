@@ -75,6 +75,19 @@ def test_item_count_question_uses_query_api() -> None:
     assert "query_api" in tool_names
 
 
+def test_distinct_groups_question_uses_query_api() -> None:
+    data = run_agent("How many distinct groups are there among learners?")
+    tool_names = [call["tool"] for call in data.get("tool_calls", [])]
+    assert "query_api" in tool_names
+
+
+def test_distinct_endpoint_question_queries_that_endpoint() -> None:
+    data = run_agent("How many distinct learner_id values are in /interactions/?")
+    query_calls = [call for call in data.get("tool_calls", []) if call.get("tool") == "query_api"]
+    assert query_calls
+    assert "/interactions" in query_calls[0].get("args", {}).get("path", "")
+
+
 def test_unauthenticated_items_status_uses_query_api() -> None:
     data = run_agent(
         "What HTTP status code does the API return when you request /items/ without sending an authentication header?"
