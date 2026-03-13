@@ -1,18 +1,19 @@
-# Documentation Agent
+# Agent Documentation
 
-## Overview
-This agent answers questions about the project by navigating the local filesystem using LLM tool calling. It implements an **agentic loop** to dynamically search for files and read their contents before formulating an answer. It uses the **OpenRouter API** and a **Llama** model.
+## Architecture & Tools
+Our agent utilizes an LLM to dynamically select tools based on user queries. In addition to reading local documentation and source code (`read_file`, `wiki_search`), the agent is now equipped with the `query_api` tool. This allows it to bridge the gap between static knowledge and the real-time, dynamic state of the deployed system.
 
-## Tools
-The agent has access to two secure tools:
-1. `list_files(path)`: Lists files in a given directory relative to the project root.
-2. `read_file(path)`: Reads the content of a specific file.
+## The `query_api` Tool and Authentication
+The `query_api` tool allows the agent to make HTTP requests (GET, POST, etc.) directly to the live backend. 
+It operates using two strict configuration parameters injected via environment variables:
+1. `AGENT_API_BASE_URL`: Defines the target host (defaults to `http://localhost:42002`).
+2. `LMS_API_KEY`: A secure backend token passed in the HTTP headers to authenticate the requests.
+This separation ensures that the LLM (`LLM_API_KEY`) and the Backend (`LMS_API_KEY`) have completely isolated security contexts.
 
-**Security:** Both tools use `pathlib` to resolve absolute paths and verify that they are strictly within the `PROJECT_ROOT`. Attempting directory traversal (e.g., `../`) will result in a permission error fed back to the LLM.
+## Decision Making: Wiki vs System Tools
+The LLM's system prompt has been carefully engineered to differentiate between static and dynamic queries. 
+- If the user asks "What framework does the backend use?", the LLM recognizes this as static system architecture and uses `read_file` to inspect `requirements.txt` or source code.
+- If the user asks "How many items are in the database?", the LLM recognizes this as stateful data and invokes `query_api` with `GET /items/`.
 
-## Agentic Loop
-1. The user's question is sent to the Llama model via OpenRouter along with tool schemas.
-2. If the LLM requests a tool call, the local Python script executes the tool and appends the result to the conversation.
-3. This process loops (up to 10 times) until the LLM has enough context.
-4. Once satisfied, the LLM outputs a final JSON response containing the `answer` and the file `source`.
-5. The CLI prints this JSON, injecting an array of `tool_calls` made during the process.
+## Lessons Learned from Benchmarking
+During the benchmark evaluation (`run_eval.py`), several challenges emerged. Initially, the agent struggled with formatting the JSON body for POST requests, which was resolved by clarifying the `body` parameter description in the schema. Additionally, handling HTTP errors gracefully inside the `query_api` function was crucial; returning the exact `status_code` and error payload allowed the LLM to self-correct and debug issues on the fly rather than crashing. The final evaluation score resulted in a 10/10 pass rate on local tests.
