@@ -1,18 +1,18 @@
 # Agent CLI — Task 1: Call an LLM from Code
 
-## Обзор
-`agent.py` — это командная строка (CLI), которая принимает вопрос пользователя, отправляет его в языковую модель (LLM) через OpenRouter и возвращает структурированный JSON-ответ. Это база для будущих задач, где будут добавлены вызовы инструментов (tool calls).
+## Overview
+`agent.py` is a command-line interface (CLI) that takes a user’s question, sends it to a language model (LLM) via OpenRouter, and returns a structured JSON response. This serves as the foundation for future tasks, where tool calls will be added.
 
-## Используемый LLM
-- **Провайдер**: [OpenRouter](https://openrouter.ai) — предоставляет бесплатный доступ к множеству моделей с поддержкой OpenAI‑совместимого API.
-- **Модель по умолчанию**: `meta-llama/llama-3.3-70b-instruct:free` (бесплатная, с хорошей поддержкой tool calling, что потребуется в Task 2–3).
-- **Альтернативные модели**: можно выбрать другие бесплатные модели из [коллекции OpenRouter](https://openrouter.ai/collections/free-models), убедившись, что они поддерживают tool calling.
-- **API**: OpenAI-совместимый чат-комплейшнс, реализованный через библиотеку `openai`.
+## LLM Used
+- **Provider**: [OpenRouter](https://openrouter.ai) — provides free access to many models with OpenAI‑compatible API support.
+- **Default model**: `meta-llama/llama-3.3-70b-instruct:free` (free, with good tool‑calling support needed for Tasks 2–3).
+- **Alternative models**: you can choose other free models from the [OpenRouter free models collection](https://openrouter.ai/collections/free-models), making sure they support tool calling.
+- **API**: OpenAI‑compatible chat completions, implemented via the `openai` library.
 
-## Конфигурация
-Все настройки хранятся в файле `.env.agent.secret` (скопирован из `.env.agent.example` и добавлен в `.gitignore`). Пример содержимого:
+## Configuration
+All settings are stored in the `.env.agent.secret` file (copied from `.env.agent.example` and added to `.gitignore`). Example contents:
 
 ```bash
-LLM_API_KEY=sk-or-v1-...
+LLM_API_KEY=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
 LLM_API_BASE=https://openrouter.ai/api/v1
 LLM_MODEL=meta-llama/llama-3.3-70b-instruct:free
