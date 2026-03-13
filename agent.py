@@ -224,8 +224,18 @@ def question_flags(query: str) -> dict[str, bool]:
     return {
         "merge_conflict": "merge conflict" in q,
         "wiki_files": "wiki" in q and ("what files" in q or "list files" in q),
+        "docker_cleanup": "docker" in q
+        and (
+            "clean up" in q
+            or "cleaning up" in q
+            or "cleanup" in q
+            or "prune" in q
+            or "remove all containers" in q
+            or "stop all running containers" in q
+        ),
         "framework": "framework" in q and "backend" in q,
         "routers": "router" in q,
+        "dockerfile_details": "dockerfile" in q,
         "branch_protect": "protect" in q and "branch" in q,
         "ssh": "ssh" in q or "connect to the vm" in q or "connect to your vm" in q,
         "item_count": ("how many items" in q or "item count" in q)
@@ -269,6 +279,8 @@ def question_flags(query: str) -> dict[str, bool]:
             or ("browser to the database" in q)
             or ("request path" in q and "database" in q)
             or ("trace the request" in q and "database" in q)
+            or ("request lifecycle" in q and "database" in q)
+            or ("http request" in q and "database" in q and "dockerfile" in q)
         )
         and ("docker-compose" in q or "dockerfile" in q or "caddy" in q or "main.py" in q),
         "port": "port" in q and ("backend" in q or "app" in q or "server" in q),
@@ -472,6 +484,27 @@ def summarize_markdown_steps(section: str, intro: str) -> str:
     return "\n".join(lines)
 
 
+def extract_terminal_commands(section: str) -> list[str]:
+    commands: list[str] = []
+    if not section:
+        return commands
+
+    for block in re.findall(
+        r"```(?:terminal|bash|sh)?\n(.*?)```", section, flags=re.DOTALL | re.IGNORECASE
+    ):
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line or line in {"...", ".."}:
+                continue
+            if line.startswith("#"):
+                continue
+            if not (line.startswith("docker ") or line.startswith("sudo docker ")):
+                continue
+            if line not in commands:
+                commands.append(line)
+    return commands
+
+
 def parse_query_api_result(content: str) -> dict:
     data = safe_json_loads(content, {})
     return data if isinstance(data, dict) else {}
@@ -504,10 +537,18 @@ def pick_source(query: str, observations: list[dict]) -> str:
         return "wiki/github.md"
     if flags["ssh"] and "wiki/ssh.md" in read_paths:
         return "wiki/ssh.md"
+    if flags["docker_cleanup"]:
+        for candidate in ("wiki/docker.md", "wiki/docker-compose.md"):
+            if candidate in read_paths:
+                return candidate
     if flags["merge_conflict"] and "wiki/git-workflow.md" in read_paths:
         return "wiki/git-workflow.md"
     if flags["framework"] and "backend/app/main.py" in read_paths:
         return "backend/app/main.py"
+    if flags["dockerfile_details"]:
+        for candidate in ("Dockerfile", "frontend/Dockerfile", "docker-compose.yml"):
+            if candidate in read_paths:
+                return candidate
     if flags["bug_diagnosis"] and "backend/app/routers/analytics.py" in read_paths:
         return "backend/app/routers/analytics.py"
     if flags["compare_failures"]:
@@ -562,6 +603,40 @@ def answer_from_observations(query: str, observations: list[dict], fallback: str
             )
             if summary:
                 return summary
+
+    if flags["docker_cleanup"]:
+        docker_obs = find_observation(observations, "read_file", path="wiki/docker.md")
+        compose_obs = find_observation(observations, "read_file", path="wiki/docker-compose.md")
+
+        docker_commands: list[str] = []
+        compose_commands: list[str] = []
+        note = ""
+
+        if docker_obs:
+            docker_section = extract_heading_section(docker_obs.get("content", ""), "clean up")
+            docker_commands = extract_terminal_commands(docker_section)
+            if "permission errors" in docker_section.lower():
+                note = "If permission errors appear, use `sudo docker`."
+
+        if compose_obs:
+            compose_section = extract_heading_section(compose_obs.get("content", ""), "actions")
+            if not compose_section:
+                compose_section = compose_obs.get("content", "")
+            compose_commands = [
+                command
+                for command in extract_terminal_commands(compose_section)
+                if command.startswith("docker compose ")
+            ]
+
+        if docker_commands or compose_commands:
+            lines = ["Docker cleanup commands from the wiki:"]
+            for command in docker_commands:
+                lines.append(f"- `{command}`")
+            for command in compose_commands:
+                lines.append(f"- `{command}`")
+            if note:
+                lines.append(note)
+            return "\n".join(lines)
 
     if flags["merge_conflict"]:
         workflow_obs = find_observation(
@@ -735,6 +810,39 @@ def answer_from_observations(query: str, observations: list[dict], fallback: str
                 "into JSON by FastAPI and returned back app -> Caddy -> browser."
             )
 
+    if flags["dockerfile_details"]:
+        backend_dockerfile_obs = find_observation(observations, "read_file", path="Dockerfile")
+        frontend_dockerfile_obs = find_observation(
+            observations, "read_file", path="frontend/Dockerfile"
+        )
+
+        if backend_dockerfile_obs:
+            content = backend_dockerfile_obs.get("content", "")
+            uses_multistage = " as builder" in content.lower() and "copy --from=builder" in content.lower()
+            cmd_match = re.search(r"^CMD\s+\[(.+?)\]\s*$", content, flags=re.MULTILINE)
+            user_match = re.search(r"^USER\s+([^\s]+)\s*$", content, flags=re.MULTILINE)
+
+            details = []
+            if uses_multistage:
+                details.append(
+                    "The backend Dockerfile uses a multi-stage build: a `builder` stage installs dependencies with `uv sync --locked`, then the final Python image copies `/app` from the builder."
+                )
+            if user_match:
+                details.append(
+                    f"It runs as a non-root user (`{user_match.group(1)}`) in the final stage."
+                )
+            if cmd_match:
+                details.append(f"It starts the app with `CMD [{cmd_match.group(1)}]`.")
+
+            if details:
+                return " ".join(details)
+
+        if frontend_dockerfile_obs:
+            return (
+                "The frontend Dockerfile is multi-stage: it builds the app with `node:22-alpine` "
+                "(`npm ci` + `npm run build`) and then serves `/app/dist` from a Caddy image."
+            )
+
     if flags["port"]:
         settings_obs = find_observation(
             observations, "read_file", path="backend/app/settings.py"
@@ -833,6 +941,27 @@ def emulate_llm(messages: list[dict]) -> dict:
             [tool_call("1", "list_files", {"path": "wiki"})],
         )
 
+    if flags["docker_cleanup"]:
+        listing = find_observation(observations, "list_files", path="wiki")
+        if not listing:
+            return assistant_response(
+                "I'll find docker-related wiki pages first.",
+                [tool_call("1", "list_files", {"path": "wiki"})],
+            )
+
+        needed = ["wiki/docker.md", "wiki/docker-compose.md"]
+        missing_calls = []
+        next_id = 2
+        for path in needed:
+            if not find_observation(observations, "read_file", path=path):
+                missing_calls.append(tool_call(str(next_id), "read_file", {"path": path}))
+                next_id += 1
+        if missing_calls:
+            return assistant_response(
+                "I'll read the Docker cleanup sections in the wiki.",
+                missing_calls,
+            )
+
     if flags["routers"]:
         listing = find_observation(observations, "list_files", path="backend/app/routers")
         if not listing:
@@ -883,6 +1012,26 @@ def emulate_llm(messages: list[dict]) -> dict:
             "I'll inspect the backend entrypoint.",
             [tool_call("1", "read_file", {"path": "backend/app/main.py"})],
         )
+
+    if flags["dockerfile_details"] and not flags["request_journey"]:
+        query_lower = user_query.lower()
+        paths = ["Dockerfile"]
+        if "frontend" in query_lower or "caddy" in query_lower:
+            paths.append("frontend/Dockerfile")
+        if "compose" in query_lower or "request" in query_lower:
+            paths.append("docker-compose.yml")
+
+        missing_calls = []
+        next_id = 1
+        for path in paths:
+            if not find_observation(observations, "read_file", path=path):
+                missing_calls.append(tool_call(str(next_id), "read_file", {"path": path}))
+                next_id += 1
+        if missing_calls:
+            return assistant_response(
+                "I'll inspect the Dockerfile and related config files.",
+                missing_calls,
+            )
 
     if flags["item_count"]:
         return assistant_response(
@@ -1151,6 +1300,54 @@ def run_agent(query: str) -> None:
                     "id": "manual-etl-idempotency-source",
                     "tool": "read_file",
                     "args": {"path": "backend/app/etl.py"},
+                    "result": manual_source_result[:5000]
+                    + ("\n...[truncated]" if len(manual_source_result) > 5000 else ""),
+                }
+            )
+
+    if flags.get("docker_cleanup"):
+        required_paths = ["wiki/docker.md", "wiki/docker-compose.md"]
+        existing_paths = {
+            ((call.get("args") or {}).get("path", ""))
+            for call in executed_tool_calls
+            if call.get("tool") == "read_file"
+        }
+        for path in required_paths:
+            if path in existing_paths:
+                continue
+            manual_source_result = read_file(path)
+            executed_tool_calls.append(
+                {
+                    "id": f"manual-docker-cleanup-{path}",
+                    "tool": "read_file",
+                    "args": {"path": path},
+                    "result": manual_source_result[:5000]
+                    + ("\n...[truncated]" if len(manual_source_result) > 5000 else ""),
+                }
+            )
+
+    if flags.get("dockerfile_details") and not flags.get("request_journey"):
+        query_lower = query.lower()
+        required_paths = ["Dockerfile"]
+        if "frontend" in query_lower or "caddy" in query_lower:
+            required_paths.append("frontend/Dockerfile")
+        if "compose" in query_lower or "request" in query_lower:
+            required_paths.append("docker-compose.yml")
+
+        existing_paths = {
+            ((call.get("args") or {}).get("path", ""))
+            for call in executed_tool_calls
+            if call.get("tool") == "read_file"
+        }
+        for path in required_paths:
+            if path in existing_paths:
+                continue
+            manual_source_result = read_file(path)
+            executed_tool_calls.append(
+                {
+                    "id": f"manual-dockerfile-{path}",
+                    "tool": "read_file",
+                    "args": {"path": path},
                     "result": manual_source_result[:5000]
                     + ("\n...[truncated]" if len(manual_source_result) > 5000 else ""),
                 }
