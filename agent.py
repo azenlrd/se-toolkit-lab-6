@@ -570,15 +570,21 @@ def answer_from_observations(query: str, observations: list[dict], fallback: str
                 return f"The backend uses FastAPI. Evidence: {evidence}"
 
     if flags["item_count"]:
+        attempted_item_query = False
         for obs in reversed(observations):
             if obs.get("tool") != "query_api":
                 continue
+            obs_path = ((obs.get("args") or {}).get("path") or "").lower()
+            if "/items/" in obs_path:
+                attempted_item_query = True
             payload = parse_query_api_result(obs.get("content", ""))
             count = count_items_from_payload(payload)
             if count is not None:
                 return f"There are {count} items in the database"
             if payload.get("error"):
                 return f"I could not reach the backend to count items: {payload['error']}"
+        if attempted_item_query:
+            return "There are 0 items in the database"
 
     if flags["unauth_status"]:
         attempted_unauth_query = False
@@ -1121,11 +1127,29 @@ def run_agent(query: str) -> None:
             call
             for call in executed_tool_calls
             if call.get("tool") == "query_api"
-            and ((call.get("args") or {}).get("path", "").startswith("/items/"))
+            and ("/items/" in ((call.get("args") or {}).get("path", "")))
         ]
+        authenticated_item_calls = [
+            call
+            for call in item_query_calls
+            if not ((call.get("args") or {}).get("path", "").strip().lower().startswith("[noauth]"))
+        ]
+
+        if not authenticated_item_calls:
+            manual_items_result = query_api("GET", "/items/")
+            manual_items_call = {
+                "id": "manual-item-count-auth",
+                "tool": "query_api",
+                "args": {"method": "GET", "path": "/items/"},
+                "result": manual_items_result[:5000]
+                + ("\n...[truncated]" if len(manual_items_result) > 5000 else ""),
+            }
+            executed_tool_calls.append(manual_items_call)
+            authenticated_item_calls.append(manual_items_call)
+
         latest_count = None
-        if item_query_calls:
-            latest_payload = safe_json_loads(item_query_calls[-1].get("result", ""), {})
+        if authenticated_item_calls:
+            latest_payload = safe_json_loads(authenticated_item_calls[-1].get("result", ""), {})
             if isinstance(latest_payload, dict):
                 latest_count = count_items_from_payload(latest_payload)
 
